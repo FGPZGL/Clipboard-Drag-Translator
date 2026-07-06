@@ -5,10 +5,11 @@ The program's UI supports only Korean.
 This program was developed using Python.<br/>
 This program was developed for the Windows operating system.<br/>
 This program uses Google Translator.<br/>
-Translation speed may vary depending on the user's computer specifications, internet connection, Google server status, and other factors.<br/>
+Translation speed may vary depending on the user's computer specifications, internet connection, Google server status, and other factors.
+
 It automatically detects the source text and translates it into your desired language.<br/>
 You can select the language to translate into in the settings.<br/>
-You can access quick settings by right-clicking.<br/>
+You can access quick settings by right-clicking.
 
 This program supports the following languages.
 ```txt
