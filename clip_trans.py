@@ -5,7 +5,7 @@ import mouse
 from PyQt5.QtWidgets import (QApplication, QLabel, QWidget, QVBoxLayout, 
                              QHBoxLayout, QSizeGrip, QFrame, QScrollArea, 
                              QPushButton, QMenu, QAction, QSystemTrayIcon, QTextEdit, QComboBox)
-from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QPixmap
 from deep_translator import GoogleTranslator
 
@@ -26,6 +26,28 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+class TranslationThread(QThread):
+    finished_signal = pyqtSignal(str, str)  
+    error_signal = pyqtSignal(str)          
+
+    def __init__(self, text, source_lang, target_lang):
+        super().__init__()
+        self.text = text
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+
+    def run(self):
+        try:
+            translator = GoogleTranslator(source=self.source_lang, target=self.target_lang)
+            result = translator.translate(self.text)
+            if result:
+                self.finished_signal.emit(self.text, result)
+            else:
+                self.error_signal.emit("⚠️ 번역 결과가 비어있습니다.")
+        except Exception as e:
+            self.error_signal.emit(f"❌ 오류 발생:\n{str(e)}")
+
+
 class ManualTranslatorWindow(QWidget):
     def __init__(self, main_icon_pixmap, main_window):
         super().__init__()
@@ -34,6 +56,7 @@ class ManualTranslatorWindow(QWidget):
         self.moving = False
         self.offset = QPoint()
         self.manual_result_pure = "" 
+        self.trans_thread = None
         self.initUI()
 
     def initUI(self):
@@ -129,21 +152,24 @@ class ManualTranslatorWindow(QWidget):
         
         target_code = self.lang_combo.currentData()
         self.result_label.setText("⏳ 번역 중...")
-        QApplication.processEvents()
         
-        try:
-            translator = GoogleTranslator(source='auto', target=target_code)
-            result = translator.translate(text_to_translate)
-            self.result_label.setText(result)
-            self.manual_result_pure = result
-        except Exception as e:
-            self.result_label.setText(f"❌ 오류 발생:\n{str(e)}")
-            self.manual_result_pure = ""
+        self.trans_thread = TranslationThread(text_to_translate, 'auto', target_code)
+        self.trans_thread.finished_signal.connect(self.on_translation_success)
+        self.trans_thread.error_signal.connect(self.on_translation_failure)
+        self.trans_thread.start()
+
+    def on_translation_success(self, original, result):
+        self.result_label.setText(result)
+        self.manual_result_pure = result
+
+    def on_translation_failure(self, error_msg):
+        self.result_label.setText(error_msg)
+        self.manual_result_pure = ""
 
     def copy_manual_text(self):
         if self.manual_result_pure:
-            pyperclip.copy(self.manual_result_pure)
             self.main_window.last_text = self.manual_result_pure
+            pyperclip.copy(self.manual_result_pure)
             self.btn_manual_copy.setText("✅ 복사 완료!")
             QTimer.singleShot(1000, lambda: self.btn_manual_copy.setText("📋 결과 복사"))
 
@@ -163,7 +189,6 @@ class MovableResizableTranslator(QWidget):
         super().__init__()
         self.source_lang = 'auto'
         self.target_lang = 'ko'
-        self.translator = GoogleTranslator(source=self.source_lang, target=self.target_lang)
         self.last_text = ""
         
         self.current_ocr_source = ""
@@ -179,8 +204,10 @@ class MovableResizableTranslator(QWidget):
         self.moving = False
         self.offset = QPoint()
         
-        self.pixmap = QPixmap(resource_path("trans.ico"))
+        self.trans_thread = None
+        self.is_translating = False 
         
+        self.pixmap = QPixmap(resource_path("trans.ico"))
         self.initUI()
         
         self.manual_window = ManualTranslatorWindow(self.pixmap, self)
@@ -396,7 +423,7 @@ class MovableResizableTranslator(QWidget):
         
         menu.addSeparator()
         action_hide = QAction("📥 백그라운드로 숨기기", self)
-        action_hide.triggered.connect(self.hide)
+        action_hide.triggered.connect(self.hide_to_background)
         menu.addAction(action_hide)
         
         return menu
@@ -421,7 +448,6 @@ class MovableResizableTranslator(QWidget):
 
     def change_target_lang(self, lang_code):
         self.target_lang = lang_code
-        self.translator = GoogleTranslator(source=self.source_lang, target=self.target_lang)
         self.label.setText(f"🌐 번역 언어가 [{self.target_lang.upper()}] 버전으로 변경되었습니다.")
 
     def hide_to_background(self):
@@ -430,8 +456,8 @@ class MovableResizableTranslator(QWidget):
 
     def copy_translated_text(self):
         if self.translated_result_pure:
-            pyperclip.copy(self.translated_result_pure)
             self.last_text = self.translated_result_pure
+            pyperclip.copy(self.translated_result_pure)
             orig_text = self.btn_copy.text()
             self.btn_copy.setText("✅ 복사 완료!")
             QTimer.singleShot(1000, lambda: self.btn_copy.setText(orig_text))
@@ -475,57 +501,76 @@ class MovableResizableTranslator(QWidget):
                             self.drag_completed_signal.emit()
 
     def trigger_drag_copy(self):
+        if self.is_translating:
+            return
         try:
             import keyboard
             old_clipboard = pyperclip.paste()
             keyboard.send('ctrl+c')
-            QApplication.processEvents()
-            QTimer.singleShot(150, lambda: self.process_translation(old_clipboard, is_drag=True))
+            
+            QTimer.singleShot(80, lambda: self.process_translation(old_clipboard, is_drag=True))
         except Exception:
             pass
 
     def check_translation_triggers(self):
-        if self.auto_translate_on:
+        if self.auto_translate_on and not self.is_translating:
             self.process_translation(None, is_drag=False)
 
     def process_translation(self, old_clipboard_data=None, is_drag=False):
         try:
             current_text = pyperclip.paste()
-            if current_text: 
-                current_text = current_text.strip()
+            if not current_text:
+                return
+            
+            current_text = current_text.strip()
             
             if current_text and current_text != self.last_text:
                 self.last_text = current_text
+                self.is_translating = True 
+                
                 self.label.setText("⏳ 번역 요청 중...")
                 self.btn_view_source.setVisible(False)
                 self.btn_view_trans.setVisible(False)
-                QApplication.processEvents() 
                 
-                translated_text = self.translator.translate(current_text)
-                if translated_text:
-                    self.current_ocr_source = current_text
-                    self.current_ocr_translated = translated_text
-                    self.translated_result_pure = translated_text 
-                    prefix = "🖱️ 드래그 영역" if is_drag else "📋 클립보드"
-                    display_text = f"[{prefix} 번역 결과 - {self.target_lang.upper()}]\n\n{translated_text}"
-                    self.label.setText(display_text)
-                    self.scroll_area.verticalScrollBar().setValue(0)
-                    
-                    self.btn_view_source.setVisible(True)
-                    self.btn_view_trans.setVisible(True)
-                    self.show_translated_text()
-                    
-                    if self.auto_popup_on: 
-                        self.show_window()
-                else:
-                    self.label.setText("⚠️ 번역 결과가 비어있습니다.")
-                self.label.repaint()
-                QApplication.processEvents()
+                self.trans_thread = TranslationThread(current_text, self.source_lang, self.target_lang)
+                
+                self.trans_thread.finished_signal.connect(
+                    lambda orig, res, d=is_drag: self.on_async_translation_success(orig, res, d)
+                )
+                self.trans_thread.error_signal.connect(self.on_async_translation_failure)
+                
+                self.trans_thread.finished.connect(self.reset_translating_status)
+                self.trans_thread.start()
                 
             if is_drag and old_clipboard_data is not None:
                 pyperclip.copy(old_clipboard_data)
+                
         except Exception:
-            pass
+            self.is_translating = False
+
+    def on_async_translation_success(self, original, result, is_drag):
+        self.current_ocr_source = original
+        self.current_ocr_translated = result
+        self.translated_result_pure = result 
+        
+        prefix = "🖱️ 드래그 영역" if is_drag else "📋 클립보드"
+        display_text = f"[{prefix} 번역 결과 - {self.target_lang.upper()}]\n\n{result}"
+        self.label.setText(display_text)
+        self.scroll_area.verticalScrollBar().setValue(0)
+        
+        self.btn_view_source.setVisible(True)
+        self.btn_view_trans.setVisible(True)
+        self.show_translated_text()
+        
+        if self.auto_popup_on: 
+            self.show_window()
+
+    def on_async_translation_failure(self, error_msg):
+        self.label.setText(error_msg)
+
+    def reset_translating_status(self):
+        """ 번역 스레드가 종료되면 상태를 초기화하여 다음 번역을 즉시 받을 수 있게 합니다. """
+        self.is_translating = False
 
     def closeEvent(self, event):
         mouse.unhook_all()
