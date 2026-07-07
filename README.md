@@ -15,7 +15,6 @@ This program supports the following languages.
 ```txt
 ┌─ Korean
 ├─ English
-├─ private
 ├─ Japanese
 ├─ Chinese
 ├─ French
